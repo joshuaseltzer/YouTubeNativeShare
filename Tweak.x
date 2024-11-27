@@ -25,6 +25,7 @@
 #import "protobuf/objectivec/GPBMessage.h"
 #import "protobuf/objectivec/GPBUnknownField.h"
 #import "protobuf/objectivec/GPBUnknownFields.h"
+#import "protobuf/objectivec/GPBUnknownFieldSet.h"
 
 @interface CustomGPBMessage : GPBMessage
 + (instancetype)deserializeFromString:(NSString*)string;
@@ -79,7 +80,81 @@ typedef NS_ENUM(NSInteger, ShareEntityType) {
     ShareEntityFieldShortFlag = 20
 };
 
-static inline NSString* extractIdWithFormat(GPBUnknownFields *fields, NSInteger fieldNumber, NSString *format) {
+static void showActivityViewControllerForShareUrlFromSourceView(NSString *shareUrl, UIView *sourceView) {
+    UIActivityViewController *activityViewController = [[UIActivityViewController alloc] initWithActivityItems:@[shareUrl] applicationActivities:nil];
+    activityViewController.excludedActivityTypes = @[UIActivityTypeAssignToContact, UIActivityTypePrint];
+
+    UIViewController *topViewController = [%c(YTUIUtils) topViewControllerForPresenting];
+
+    if (activityViewController.popoverPresentationController) {
+        activityViewController.popoverPresentationController.sourceView = topViewController.view;
+        if (sourceView) {
+            activityViewController.popoverPresentationController.sourceRect = [sourceView convertRect:sourceView.bounds toView:topViewController.view];
+        }
+        else {
+            CGFloat screenWidth = [UIScreen mainScreen].bounds.size.width;
+            CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
+            activityViewController.popoverPresentationController.sourceRect = CGRectMake(screenWidth / 2.0, screenHeight, 0, 0);
+        }
+    }
+
+    [topViewController presentViewController:activityViewController animated:YES completion:nil];
+}
+
+
+/* -------------------- Legacy (versions prior to YouTube 19.35.3) -------------------- */
+
+static inline NSString* extractIdFromFieldSetWithFormat(GPBUnknownFieldSet *fieldSet, NSInteger fieldNumber, NSString *format) {
+    if (![fieldSet hasField:fieldNumber])
+        return nil;
+    GPBUnknownField *idField = [fieldSet getField:fieldNumber];
+    if ([idField.lengthDelimitedList count] != 1)
+        return nil;
+    NSString *id = [[NSString alloc] initWithData:[idField.lengthDelimitedList firstObject] encoding:NSUTF8StringEncoding];
+    return [NSString stringWithFormat:format, id];
+}
+
+static BOOL showNativeShareSheetFromFieldSet(GPBUnknownFieldSet *fieldSet, UIView *sourceView) {
+    NSString *shareUrl;
+
+    if ([fieldSet hasField:ShareEntityFieldClip]) {
+        GPBUnknownField *shareEntityClip = [fieldSet getField:ShareEntityFieldClip];
+        if ([shareEntityClip.lengthDelimitedList count] != 1)
+            return NO;
+        GPBMessage *clipMessage = [%c(GPBMessage) parseFromData:[shareEntityClip.lengthDelimitedList firstObject] error:nil];
+        shareUrl = extractIdFromFieldSetWithFormat(clipMessage.unknownFields, 1, @"https://youtube.com/clip/%@");
+    }
+
+    if (!shareUrl)
+        shareUrl = extractIdFromFieldSetWithFormat(fieldSet, ShareEntityFieldChannel, @"https://youtube.com/channel/%@");
+
+    if (!shareUrl) {
+        shareUrl = extractIdFromFieldSetWithFormat(fieldSet, ShareEntityFieldPlaylist, @"%@");
+        if (shareUrl) {
+            if (![shareUrl hasPrefix:@"PL"] && ![shareUrl hasPrefix:@"FL"])
+                shareUrl = [shareUrl stringByAppendingString:@"&playnext=1"];
+            shareUrl = [@"https://youtube.com/playlist?list=" stringByAppendingString:shareUrl];
+        }
+    }
+
+    if (!shareUrl)
+        shareUrl = extractIdFromFieldSetWithFormat(fieldSet, ShareEntityFieldVideo, @"https://youtube.com/watch?v=%@");
+
+    if (!shareUrl)
+        shareUrl = extractIdFromFieldSetWithFormat(fieldSet, ShareEntityFieldPost, @"https://youtube.com/post/%@");
+
+    if (!shareUrl)
+        return NO;
+
+    showActivityViewControllerForShareUrlFromSourceView(shareUrl, sourceView);
+
+    return YES;
+}
+
+
+/* -------------------- Modern (YouTube 19.35.3 and later) -------------------- */
+
+static inline NSString* extractIdFromFieldsWithFormat(GPBUnknownFields *fields, NSInteger fieldNumber, NSString *format) {
     NSArray<GPBUnknownField*> *fieldArray = [fields fields:fieldNumber];
     if (!fieldArray)
         return nil;
@@ -89,9 +164,7 @@ static inline NSString* extractIdWithFormat(GPBUnknownFields *fields, NSInteger 
     return [NSString stringWithFormat:format, id];
 }
 
-static BOOL showNativeShareSheet(NSString *serializedShareEntity, UIView *sourceView) {
-    GPBMessage *shareEntity = [%c(GPBMessage) deserializeFromString:serializedShareEntity];
-    GPBUnknownFields *fields = [[%c(GPBUnknownFields) alloc] initFromMessage:shareEntity];
+static BOOL showNativeShareSheetFromFields(GPBUnknownFields *fields, UIView *sourceView) {
     NSString *shareUrl;
 
     NSArray<GPBUnknownField*> *shareEntityClip = [fields fields:ShareEntityFieldClip];
@@ -99,14 +172,14 @@ static BOOL showNativeShareSheet(NSString *serializedShareEntity, UIView *source
         if ([shareEntityClip count] != 1)
             return NO;
         GPBMessage *clipMessage = [%c(GPBMessage) parseFromData:[shareEntityClip firstObject].lengthDelimited error:nil];
-        shareUrl = extractIdWithFormat([[%c(GPBUnknownFields) alloc] initFromMessage:clipMessage], 1, @"https://youtube.com/clip/%@");
+        shareUrl = extractIdFromFieldsWithFormat([[%c(GPBUnknownFields) alloc] initFromMessage:clipMessage], 1, @"https://youtube.com/clip/%@");
     }
 
     if (!shareUrl)
-        shareUrl = extractIdWithFormat(fields, ShareEntityFieldChannel, @"https://youtube.com/channel/%@");
+        shareUrl = extractIdFromFieldsWithFormat(fields, ShareEntityFieldChannel, @"https://youtube.com/channel/%@");
 
     if (!shareUrl) {
-        shareUrl = extractIdWithFormat(fields, ShareEntityFieldPlaylist, @"%@");
+        shareUrl = extractIdFromFieldsWithFormat(fields, ShareEntityFieldPlaylist, @"%@");
         if (shareUrl) {
             if (![shareUrl hasPrefix:@"PL"] && ![shareUrl hasPrefix:@"FL"])
                 shareUrl = [shareUrl stringByAppendingString:@"&playnext=1"];
@@ -118,26 +191,16 @@ static BOOL showNativeShareSheet(NSString *serializedShareEntity, UIView *source
         NSString *format = @"https://youtube.com/watch?v=%@";
         if ([fields fields:ShareEntityFieldShortFlag])
             format = @"https://youtube.com/shorts/%@";
-        shareUrl = extractIdWithFormat(fields, ShareEntityFieldVideo, format);
+        shareUrl = extractIdFromFieldsWithFormat(fields, ShareEntityFieldVideo, format);
     }
 
     if (!shareUrl)
-        shareUrl = extractIdWithFormat(fields, ShareEntityFieldPost, @"https://youtube.com/post/%@");
+        shareUrl = extractIdFromFieldsWithFormat(fields, ShareEntityFieldPost, @"https://youtube.com/post/%@");
 
     if (!shareUrl)
         return NO;
 
-    UIActivityViewController *activityViewController = [[UIActivityViewController alloc] initWithActivityItems:@[shareUrl] applicationActivities:nil];
-    activityViewController.excludedActivityTypes = @[UIActivityTypeAssignToContact, UIActivityTypePrint];
-
-    UIViewController *topViewController = [%c(YTUIUtils) topViewControllerForPresenting];
-
-    if (activityViewController.popoverPresentationController) {
-        activityViewController.popoverPresentationController.sourceView = topViewController.view;
-        activityViewController.popoverPresentationController.sourceRect = [sourceView convertRect:sourceView.bounds toView:topViewController.view];
-    }
-
-    [topViewController presentViewController:activityViewController animated:YES completion:nil];
+    showActivityViewControllerForShareUrlFromSourceView(shareUrl, sourceView);
 
     return YES;
 }
@@ -153,8 +216,16 @@ static BOOL showNativeShareSheet(NSString *serializedShareEntity, UIView *source
     YTIShareEntityEndpoint *shareEntityEndpoint = [self.command getExtension:shareEntityEndpointDescriptor];
     if (!shareEntityEndpoint.hasSerializedShareEntity)
         return %orig;
-    if (!showNativeShareSheet(shareEntityEndpoint.serializedShareEntity, self.fromView))
-        return %orig;
+    GPBMessage *shareEntity = [%c(GPBMessage) deserializeFromString:shareEntityEndpoint.serializedShareEntity];
+    if ([shareEntity respondsToSelector:@selector(unknownFields)]) {
+        GPBUnknownFieldSet *fieldSet = shareEntity.unknownFields;
+        if (!showNativeShareSheetFromFieldSet(fieldSet, self.fromView))
+            return %orig;
+    } else {
+        GPBUnknownFields *fields = [[%c(GPBUnknownFields) alloc] initFromMessage:shareEntity];
+        if (!showNativeShareSheetFromFields(fields, self.fromView))
+            return %orig;
+    }
 }
 %end
 
@@ -175,7 +246,16 @@ static BOOL showNativeShareSheet(NSString *serializedShareEntity, UIView *source
     YTIUpdateShareSheetCommand *updateShareSheetCommand = [innertubeCommand getExtension:updateShareSheetCommandDescriptor];
     if (!updateShareSheetCommand.hasSerializedShareEntity)
         return %orig;
-    if (!showNativeShareSheet(updateShareSheetCommand.serializedShareEntity, context.context.fromView))
-        return %orig;
+    GPBMessage *shareEntity = [%c(GPBMessage) deserializeFromString:updateShareSheetCommand.serializedShareEntity];
+    UIView *fromView = [context.context respondsToSelector:@selector(fromView)] ? context.context.fromView : nil;
+    if ([shareEntity respondsToSelector:@selector(unknownFields)]) {
+        GPBUnknownFieldSet *fieldSet = shareEntity.unknownFields;
+        if (!showNativeShareSheetFromFieldSet(fieldSet, fromView))
+            return %orig;
+    } else {
+        GPBUnknownFields *fields = [[%c(GPBUnknownFields) alloc] initFromMessage:shareEntity];
+        if (!showNativeShareSheetFromFields(fields, fromView))
+            return %orig;
+    }
 }
 %end
