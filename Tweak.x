@@ -77,7 +77,7 @@ typedef NS_ENUM(NSInteger, ShareEntityType) {
     ShareEntityFieldChannel = 3,
     ShareEntityFieldPost = 6,
     ShareEntityFieldClip = 8,
-    ShareEntityFieldShortFlag = 20
+    ShareEntityFieldShortFlag = 10
 };
 
 static void showActivityViewControllerForShareUrlFromSourceView(NSString *shareUrl, UIView *sourceView) {
